@@ -1,0 +1,33 @@
+{
+  "name": "trade-bot-v2",
+  "version": "1.0.0",
+  "description": "Speed-first BTC 5m bot: realtime market price layer + executor layer, no legacy src",
+  "private": true,
+  "main": "dist/run.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/run.js",
+    "dev": "ts-node src/run.ts"
+  },
+  "dependencies": {
+    "@chainlink/data-streams-sdk": "^1.2.1",
+    "dotenv": "^16.4.5",
+    "ws": "^8.19.0",
+    "@polymarket/clob-client": "^4.22.8",
+    "@ethersproject/wallet": "^5.7.0",
+    "@ethersproject/constants": "^5.7.0",
+    "@ethersproject/bignumber": "^5.7.0",
+    "@ethersproject/units": "^5.7.0",
+    "@ethersproject/providers": "^5.7.2",
+    "@ethersproject/contracts": "^5.7.0",
+    "@safe-global/protocol-kit": "^6.1.2",
+    "@safe-global/types-kit": "^3.0.0",
+    "redis": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

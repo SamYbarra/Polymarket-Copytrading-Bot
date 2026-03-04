@@ -1,0 +1,22 @@
+[
+  "minutesElapsed",
+  "btcDeltaPctAtPrediction",
+  "hotWalletUpVolume",
+  "hotWalletDownVolume",
+  "hotWalletImbalance",
+  "hotWalletCountUp",
+  "hotWalletCountDown",
+  "hotWalletAvgWinRateUp",
+  "hotWalletAvgWinRateDown",
+  "hotWalletTotalVolume",
+  "orderbookImbalance",
+  "spreadRatio",
+  "liquidityRatio",
+  "totalVolumeUp",
+  "totalVolumeDown",
+  "volumeRatio",
+  "tradeCountUp",
+  "tradeCountDown",
+  "largeTradeCountUp",
+  "largeTradeCountDown"
+]
