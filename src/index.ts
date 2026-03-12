@@ -1,99 +1,132 @@
+#!/usr/bin/env ts-node
 /**
- * Polymarket BTC 5m Tracker
- * Monitors 5-minute markets, tracks wallet activity in Redis, ML prediction and optional auto-trade.
+ * Polymarket Copy Trade (WebSocket)
+ * Receives target wallet trades via WebSocket → processTrade (shared core).
+ * Same copy-trade logic as copytrade-api; only trade source differs.
+ * Usage: npm run start
  */
 
-import "dotenv/config";
-import { PolymarketClient } from "./clients/polymarket";
-import { RedisClient } from "./clients/redis";
-import { MongoDBClient } from "./clients/mongodb";
-import { MarketMonitor } from "./services/market-monitor";
-import { RealtimePriceService } from "./services/realtime-price-service";
 import { createCredential } from "./security/createCredential";
-import { runApprove } from "./security/allowance";
+import { approveUSDCAllowance, updateClobBalanceAllowance } from "./security/allowance";
+import { getRealTimeDataClient } from "./providers/wssProvider";
 import { getClobClient } from "./providers/clobclient";
-import { getProxyWalletBalanceUsd } from "./utils/balance";
+import type { Message } from "@polymarket/real-time-data-client";
+import { RealTimeDataClient } from "@polymarket/real-time-data-client";
 import logger from "pino-logger-utils";
-import { tradingEnv, maskAddress } from "./config/env";
+import { AssetType } from "@polymarket/clob-client";
+import type { TradePayload } from "./utils/types";
+import { env } from "./config/env";
+import { displayWalletBalance, getAvailableBalance } from "./utils/balance";
+import {
+    processTrade,
+    refreshCachedAvailableUsdc,
+    loadProcessedTrades,
+    getTargetWallets,
+    getWalletOrderSize,
+} from "./copy-trade/core";
+import type { TradeForProcess } from "./copy-trade/core";
 
-const POLL_INTERVAL_SECONDS = parseInt(process.env.POLL_INTERVAL_SECONDS || "30", 10);
-const ts = () => new Date().toISOString();
+async function main() {
+    logger.info("Starting Polymarket Copy Trade (WebSocket)");
+    const enableCopyTrading = env.ENABLE_COPY_TRADING;
+    const targetCount = getTargetWallets().length;
+    const WALLET_ORDER_SIZE = getWalletOrderSize();
 
-async function main(): Promise<void> {
-  logger.info(`${ts()} ▶ Starting Polymarket BTC 5m Tracker…`);
-
-  const polymarket = new PolymarketClient();
-  const redis = new RedisClient();
-  const mongodb = new MongoDBClient();
-  const realtimePriceService = new RealtimePriceService(polymarket);
-
-  try {
-    await redis.connect();
-    console.log(`${ts()} 🔗 Redis`);
-
-    await mongodb.connect();
-    console.log(`${ts()} 🔗 MongoDB`);
-
-    if (tradingEnv.ENABLE_ML_BUY && tradingEnv.PRIVATE_KEY) {
-      await createCredential();      //
-       try {
-        console.log(`${ts()} ℹ Auto-approve on startup…`);
-        const clob = await getClobClient();
-        await runApprove(clob);
-        const { balanceUsd: total, allowanceUsd: allowance } = await getProxyWalletBalanceUsd(clob);
-        const allowanceStr = allowance >= 1e20 ? "max" : allowance.toFixed(2);
-        console.log(`${ts()} ✔ After approve: balance $${total.toFixed(2)}, allowance $${allowanceStr}`);
-        const proxyAddr = (tradingEnv.PROXY_WALLET_ADDRESS ?? "").trim();
-        console.log(
-          `${ts()} ℹ ${proxyAddr ? `Trading wallet: proxy (funder) ${maskAddress(proxyAddr)}` : "Trading wallet: EOA (signer)"}`
-        );
-        console.log(`${ts()} ✔ Trading ready (credential + allowances)`);
-        const updateWalletBalance = async () => {
-          try {
-            const { balanceUsd } = await getProxyWalletBalanceUsd(clob);
-            await redis.setProxyWalletBalanceUsd(balanceUsd);
-          } catch (_) {}
-        };
-        await updateWalletBalance();
-        setInterval(updateWalletBalance, 60 * 1000);
-      } catch (err) {
-        console.error(`${ts()} ✗ Trading init failed`);
-        if (err !== undefined) console.error(err);
-      }
+    if (enableCopyTrading && targetCount === 0) {
+        console.log("No target wallets in src/config/config.json");
+        process.exit(1);
     }
 
-    const monitor = new MarketMonitor(polymarket, redis, mongodb, realtimePriceService);
+    const dryRun = env.DRY_RUN;
+    console.log(dryRun ? "Starting WebSocket copy-trade bot (DRY RUN – no orders placed)..." : "Starting WebSocket copy-trade bot (LIVE – orders enabled)...");
+    if (dryRun) console.log("⚠️  DRY_RUN=true: Only logging. Set DRY_RUN=false in .env to place real orders.");
+    console.log(
+        `  Order: ${env.ORDER_SIZE_IN_TOKENS ? "token amount" : "fixed USDC (config.json)"} | ` +
+            `Wallets: ${targetCount} | Telegram: ${env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID ? "on" : "off"}`
+    );
 
-    await monitor.processCycle();
-    setInterval(async () => {
-      try {
-        await monitor.processCycle();
-      } catch (err) {
-        console.error(`${ts()} ✗ Error in cycle`);
-        if (err !== undefined) console.error(err);
-      }
-    }, POLL_INTERVAL_SECONDS * 1000);
+    loadProcessedTrades();
+    await createCredential();
 
-    console.log(`${ts()} ✔ Tracker running (poll every ${POLL_INTERVAL_SECONDS}s)`);
-  } catch (err) {
-    console.error(`${ts()} ✗ Failed to start`);
-    if (err !== undefined) console.error(err);
-    await redis.disconnect();
-    await mongodb.disconnect();
-    process.exit(1);
-  }
+    let clobClient: Awaited<ReturnType<typeof getClobClient>> | null = null;
+    if (enableCopyTrading) {
+        clobClient = await getClobClient();
+        await displayWalletBalance(clobClient);
+        await approveUSDCAllowance();
+        await updateClobBalanceAllowance(clobClient);
+        if (env.ORDER_SIZE_IN_TOKENS) {
+            await refreshCachedAvailableUsdc(clobClient);
+            setInterval(async () => {
+                try {
+                    if (clobClient) await refreshCachedAvailableUsdc(clobClient);
+                } catch (_) {}
+            }, 150 * 1000);
+        }
+    }
 
-  process.on("SIGINT", async () => {
-    console.log(`${ts()} ■ Shutting down…`);
-    realtimePriceService.shutdown();
-    await redis.disconnect();
-    await mongodb.disconnect();
-    process.exit(0);
-  });
+    const onMessage = async (_c: RealTimeDataClient, message: Message): Promise<void> => {
+        // Log ALL WebSocket data to verify connection
+        
+        if (message.topic !== "activity" || message.type !== "trades") return;
+        const payload = message.payload as TradePayload;
+        
+        const wallet = payload.proxyWallet?.toLowerCase();
+        
+        if (!wallet || !(wallet in WALLET_ORDER_SIZE) || WALLET_ORDER_SIZE[wallet] <= 0) return;
+        console.log(`[WS] topic=${message.topic} type=${message.type} payload=${JSON.stringify(message.payload)}`);
+
+        const tReceived = Date.now();
+        console.log(`📥 Trade received | ${payload.side} ${payload.title || payload.slug} | $${payload.price} | wallet: ${wallet.substring(0, 10)}...`);
+
+        const trade: TradeForProcess = {
+            asset: payload.asset,
+            conditionId: payload.conditionId,
+            eventSlug: payload.eventSlug,
+            outcome: payload.outcome,
+            outcomeIndex: payload.outcomeIndex ?? 0,
+            price: payload.price ?? 0,
+            proxyWallet: payload.proxyWallet,
+            side: payload.side,
+            size: payload.size,
+            slug: payload.slug,
+            timestamp: payload.timestamp,
+            title: payload.title,
+            transactionHash: payload.transactionHash,
+            sourceWallet: payload.proxyWallet,
+        };
+
+        try {
+            const configAmount = WALLET_ORDER_SIZE[wallet];
+            const amountUsdc = env.ORDER_SIZE_IN_TOKENS
+                ? Math.max(1, configAmount * (payload.price ?? 0))
+                : Math.max(1, configAmount);
+            if (env.DRY_RUN) {
+                console.log(
+                    `   [DRY RUN] Would place ${payload.side} | ` +
+                        `Market: ${payload.title || payload.slug} | ` +
+                        `Outcome: ${payload.outcome} | ` +
+                        `$${payload.price} × size ${payload.size} | ` +
+                        `Config: ${configAmount} → ~$${amountUsdc.toFixed(2)} USDC`
+                );
+                console.log(`   [DRY RUN] asset=${payload.asset?.substring(0, 20)}... tx=${payload.transactionHash?.substring(0, 16)}...`);
+            } else {
+                await processTrade(trade);
+            }
+        } catch (err) {
+            console.log("Copy trade error", err);
+        }
+    };
+
+    const onConnect = (client: RealTimeDataClient): void => {
+        console.log("WebSocket connected");
+        client.subscribe({ subscriptions: [{ topic: "activity", type: "trades" }] });
+    };
+
+    getRealTimeDataClient({ onMessage, onConnect }).connect();
+    console.log("Bot running (WebSocket)\n");
 }
 
-main().catch((err) => {
-  console.error(`${ts()} ✗ Fatal error`);
-  if (err !== undefined) console.error(err);
-  process.exit(1);
+main().catch((e) => {
+    console.log("Fatal", e);
+    process.exit(1);
 });

@@ -1,114 +1,160 @@
-/**
- * Balance and allowance validation before buy.
- * When using a proxy (GNOSIS_SAFE), the CLOB API often returns allowance 0 (see Polymarket/clob-client#128).
- * We fall back to on-chain proxy balance/allowance when CLOB says allowance is 0 but balance > 0.
- */
-
-import { ClobClient, AssetType } from "@polymarket/clob-client";
-import { Contract } from "@ethersproject/contracts";
-import { JsonRpcProvider } from "@ethersproject/providers";
-import { getContractConfig } from "@polymarket/clob-client";
-import { tradingEnv, getRpcUrl } from "../config/env";
-const ts = () => new Date().toISOString();
+import { ClobClient, AssetType, type OpenOrder } from "@polymarket/clob-client";
 
 const CLOB_DECIMALS = 6;
-const USDC_DECIMALS = 6;
-const USDC_ABI = [
-  "function balanceOf(address account) view returns (uint256)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-];
 
+/**
+ * CLOB API commonly returns amounts in raw units (micro, 6 decimals).
+ * If the string already contains a decimal point, treat it as human-readable.
+ */
 function parseClobAmount(value: string | undefined, decimals: number = CLOB_DECIMALS): number {
-  if (!value) return 0;
-  const trimmed = value.trim();
-  if (!trimmed) return 0;
-  const n = parseFloat(trimmed);
-  if (Number.isNaN(n)) return 0;
-  if (trimmed.includes(".")) return n;
-  return n / Math.pow(10, decimals);
+    if (!value) return 0;
+    const trimmed = value.trim();
+    if (!trimmed) return 0;
+    const n = parseFloat(trimmed);
+    if (Number.isNaN(n)) return 0;
+    if (trimmed.includes(".")) return n;
+    return n / Math.pow(10, decimals);
 }
 
-export async function getAvailableBalance(client: ClobClient, assetType: AssetType): Promise<number> {
-  try {
-    const balanceResponse = await client.getBalanceAllowance({
-      asset_type: assetType,
-    });
-    const totalBalance = parseClobAmount(balanceResponse.balance);
-    const allowance = parseClobAmount(balanceResponse.allowance);
-    const available = Math.min(totalBalance, allowance);
-    return Math.max(0, available);
-  } catch {
-    return 0;
-  }
-}
+/**
+ * Calculate available balance for placing orders
+ * Formula: availableBalance = totalBalance - sum of (orderSize - orderFillAmount) for open orders
+ */
+export async function getAvailableBalance(
+    client: ClobClient,
+    assetType: AssetType,
+    tokenId?: string
+): Promise<number> {
+    try {
+        // Get total balance
+        const balanceResponse = await client.getBalanceAllowance({
+            asset_type: assetType,
+            ...(tokenId && { token_id: tokenId }),
+        });
 
-/** Read proxy's USDC balance and exchange allowance on-chain (fallback when CLOB returns 0). */
-async function getProxyOnChainBalanceAllowance(proxyAddress: string): Promise<{
-  balanceUsd: number;
-  allowanceUsd: number;
-} | null> {
-  try {
-    const chainId = tradingEnv.CHAIN_ID ?? 137;
-    const config = getContractConfig(chainId);
-    const provider = new JsonRpcProvider(getRpcUrl(chainId));
-    const usdc = new Contract(config.collateral, USDC_ABI, provider);
-    const [balanceWei, allowanceWei] = await Promise.all([
-      usdc.balanceOf(proxyAddress),
-      usdc.allowance(proxyAddress, config.exchange),
-    ]);
-    const balanceUsd = Number(balanceWei.toString()) / Math.pow(10, USDC_DECIMALS);
-    const allowanceUsd = Number(allowanceWei.toString()) / Math.pow(10, USDC_DECIMALS);
-    return { balanceUsd, allowanceUsd };
-  } catch {
-    return null;
-  }
-}
+        const totalBalance = parseClobAmount(balanceResponse.balance);
 
-/** Get proxy wallet USDC balance and allowance (for display). */
-export async function getProxyWalletBalanceUsd(client: ClobClient): Promise<{
-  balanceUsd: number;
-  allowanceUsd: number;
-  availableUsd: number;
-}> {
-  try {
-    const balanceResponse = await client.getBalanceAllowance({
-      asset_type: AssetType.COLLATERAL,
-    });
-    const balanceUsd = parseClobAmount(balanceResponse.balance);
-    let allowanceUsd = parseClobAmount(balanceResponse.allowance);
-    const proxyAddress = (tradingEnv.PROXY_WALLET_ADDRESS ?? "").trim();
-    if (proxyAddress && balanceUsd > 0 && allowanceUsd === 0) {
-      const onChain = await getProxyOnChainBalanceAllowance(proxyAddress);
-      if (onChain) {
-        allowanceUsd = onChain.allowanceUsd;
-      }
+        // Get open orders for this asset
+        const openOrders = await client.getOpenOrders(
+            tokenId ? { asset_id: tokenId } : undefined
+        );
+
+        // Calculate reserved amount from open orders
+        let reservedAmount = 0;
+        for (const order of openOrders) {
+            // Only count orders for the same asset type
+            const orderSide = order.side.toUpperCase();
+            const isBuyOrder = orderSide === "BUY";
+            const isSellOrder = orderSide === "SELL";
+
+            // For BUY orders, reserve USDC (COLLATERAL)
+            // For SELL orders, reserve tokens (CONDITIONAL)
+            if (
+                (assetType === AssetType.COLLATERAL && isBuyOrder) ||
+                (assetType === AssetType.CONDITIONAL && isSellOrder)
+            ) {
+                const orderSize = parseClobAmount(order.original_size);
+                const sizeMatched = parseClobAmount(order.size_matched);
+                const reserved = orderSize - sizeMatched;
+                reservedAmount += reserved;
+            }
+        }
+
+        const availableBalance = totalBalance - reservedAmount;
+
+        console.log(
+            `Balance check: Total=${totalBalance}, Reserved=${reservedAmount}, Available=${availableBalance}`
+        );
+
+        return Math.max(0, availableBalance);
+    } catch (error) {
+        console.log(
+            `Failed to get available balance: ${error instanceof Error ? error.message : String(error)}`
+        );
+        // Return 0 on error to be safe
+        return 0;
     }
-    const availableUsd = Math.min(balanceUsd, allowanceUsd);
-    return {
-      balanceUsd: Math.max(0, balanceUsd),
-      allowanceUsd: Math.max(0, allowanceUsd),
-      availableUsd: Math.max(0, availableUsd),
-    };
-  } catch {
-    return { balanceUsd: 0, allowanceUsd: 0, availableUsd: 0 };
-  }
 }
 
+/**
+ * Get and display wallet balance details
+ */
+export async function displayWalletBalance(client: ClobClient): Promise<void> {
+    try {
+        const balanceResponse = await client.getBalanceAllowance({
+            asset_type: AssetType.COLLATERAL,
+        });
+
+        const balance = parseClobAmount(balanceResponse.balance);
+        const allowance = parseClobAmount(balanceResponse.allowance);
+
+        console.log("═══════════════════════════════════════");
+        console.log("💰 WALLET BALANCE & ALLOWANCE");
+        console.log("═══════════════════════════════════════");
+        console.log(`USDC Balance: ${balance.toFixed(6)}`);
+        console.log(`USDC Allowance: ${allowance.toFixed(6)}`);
+        console.log(`Available: ${balance.toFixed(6)} (Balance: ${balance.toFixed(6)}, Allowance: ${allowance.toFixed(6)})`);
+        console.log("═══════════════════════════════════════");
+    } catch (error) {
+        console.log(`Failed to get wallet balance: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+/**
+ * Validate if we have enough balance for a BUY order
+ */
 export async function validateBuyOrderBalance(
-  client: ClobClient,
-  requiredAmount: number
-): Promise<{ valid: boolean; available: number; required: number }> {
-  try {
-    const { balanceUsd, allowanceUsd, availableUsd } = await getProxyWalletBalanceUsd(client);
-    const available = availableUsd;
-    const valid = available >= requiredAmount;
-    if (!valid) {
-      console.log(`${ts()} ⏭ Balance: need $${requiredAmount.toFixed(2)}, have $${available.toFixed(2)} (bal $${balanceUsd.toFixed(2)}, allow $${allowanceUsd.toFixed(2)})`);
+    client: ClobClient,
+    requiredAmount: number
+): Promise<{ valid: boolean; available: number; required: number; balance?: number; allowance?: number }> {
+    try {
+        // Get balance and allowance details
+        const balanceResponse = await client.getBalanceAllowance({
+            asset_type: AssetType.COLLATERAL,
+        });
+
+        const balance = parseClobAmount(balanceResponse.balance);
+        const allowance = parseClobAmount(balanceResponse.allowance);
+        const available = await getAvailableBalance(client, AssetType.COLLATERAL);
+        const valid = available >= requiredAmount;
+
+        if (!valid) {
+            console.log("═══════════════════════════════════════");
+            console.log("⚠️  INSUFFICIENT BALANCE/ALLOWANCE");
+            console.log("═══════════════════════════════════════");
+            console.log(`Required: ${requiredAmount.toFixed(6)} USDC`);
+            console.log(`Available: ${available.toFixed(6)} USDC`);
+            console.log(`Balance: ${balance.toFixed(6)} USDC`);
+            console.log(`Allowance: ${allowance.toFixed(6)} USDC`);
+            console.log("═══════════════════════════════════════");
+        }
+
+        return { valid, available, required: requiredAmount, balance, allowance };
+    } catch (error) {
+        console.log(`Failed to validate balance: ${error instanceof Error ? error.message : String(error)}`);
+        const available = await getAvailableBalance(client, AssetType.COLLATERAL);
+        return { valid: false, available, required: requiredAmount };
     }
-    return { valid, available, required: requiredAmount };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`${ts()} ✗ Balance check: ${msg}`);
-    return { valid: false, available: 0, required: requiredAmount };
-  }
 }
+
+/**
+ * Validate if we have enough tokens for a SELL order
+ */
+export async function validateSellOrderBalance(
+    client: ClobClient,
+    tokenId: string,
+    requiredAmount: number
+): Promise<{ valid: boolean; available: number; required: number }> {
+    const available = await getAvailableBalance(client, AssetType.CONDITIONAL, tokenId);
+    const valid = available >= requiredAmount;
+
+    if (!valid) {
+        console.log(
+            `Insufficient token balance: Token=${tokenId.substring(0, 20)}..., Required=${requiredAmount}, Available=${available}`
+        );
+    }
+
+    return { valid, available, required: requiredAmount };
+}
+
+

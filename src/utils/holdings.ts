@@ -1,12 +1,13 @@
-/**
- * Holdings for ML-bought tokens. Used by auto-redeem service.
- */
-
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { resolve } from "path";
 
+/**
+ * Holdings structure: market_id (conditionId) -> { token_id: amount }
+ */
 export interface TokenHoldings {
-  [marketId: string]: { [tokenId: string]: number };
+    [marketId: string]: {
+        [tokenId: string]: number;
+    };
 }
 
 const HOLDINGS_FILE = resolve(process.cwd(), "src/data/token-holding.json");
@@ -14,70 +15,137 @@ const LOG_DIR = resolve(process.cwd(), "log");
 const HOLDINGS_LOG_FILE = resolve(LOG_DIR, "holdings-redeem.log");
 
 function ensureLogDir(): void {
-  if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+    if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
 }
 
 function logToHoldingsFile(line: string): void {
-  try {
-    ensureLogDir();
-    appendFileSync(HOLDINGS_LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
-  } catch (_) {}
+    try {
+        ensureLogDir();
+        appendFileSync(HOLDINGS_LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
+    } catch (_) {}
 }
 
+/**
+ * Load holdings from file
+ */
 export function loadHoldings(): TokenHoldings {
-  if (!existsSync(HOLDINGS_FILE)) return {};
-  try {
-    return JSON.parse(readFileSync(HOLDINGS_FILE, "utf-8")) as TokenHoldings;
-  } catch {
-    return {};
-  }
+    if (!existsSync(HOLDINGS_FILE)) {
+        return {};
+    }
+
+    try {
+        const content = readFileSync(HOLDINGS_FILE, "utf-8");
+        return JSON.parse(content) as TokenHoldings;
+    } catch (error) {
+        console.log("Failed to load holdings", error);
+        return {};
+    }
 }
 
+/**
+ * Save holdings to file
+ */
 export function saveHoldings(holdings: TokenHoldings): void {
-  const dir = resolve(process.cwd(), "src/data");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(HOLDINGS_FILE, JSON.stringify(holdings, null, 2));
+    try {
+        writeFileSync(HOLDINGS_FILE, JSON.stringify(holdings, null, 2));
+    } catch (error) {
+        console.log("Failed to save holdings", error);
+    }
 }
 
+/**
+ * Add tokens to holdings after a BUY order
+ */
 export function addHoldings(marketId: string, tokenId: string, amount: number): void {
-  const holdings = loadHoldings();
-  if (!holdings[marketId]) holdings[marketId] = {};
-  if (!holdings[marketId][tokenId]) holdings[marketId][tokenId] = 0;
-  holdings[marketId][tokenId] += amount;
-  saveHoldings(holdings);
-  logToHoldingsFile(`HOLDINGS_ADD conditionId=${marketId} tokenId=${tokenId} amount=${amount}`);
-}
-
-/** Reduce holdings (e.g. partial sell). Clamps to 0. Returns actual amount reduced. */
-export function reduceHoldings(marketId: string, tokenId: string, amount: number): number {
-  const holdings = loadHoldings();
-  if (!holdings[marketId]?.[tokenId]) return 0;
-  const current = holdings[marketId][tokenId];
-  const reduce = Math.min(amount, current);
-  if (reduce <= 0) return 0;
-  holdings[marketId][tokenId] = current - reduce;
-  if (holdings[marketId][tokenId] === 0) delete holdings[marketId][tokenId];
-  if (Object.keys(holdings[marketId]).length === 0) delete holdings[marketId];
-  saveHoldings(holdings);
-  logToHoldingsFile(`HOLDINGS_REDUCE conditionId=${marketId} tokenId=${tokenId} amount=${reduce}`);
-  return reduce;
-}
-
-/** Get current shares for a token in a market. */
-export function getHoldings(marketId: string, tokenId: string): number {
-  const holdings = loadHoldings();
-  return holdings[marketId]?.[tokenId] ?? 0;
-}
-
-export function getAllHoldings(): TokenHoldings {
-  return loadHoldings();
-}
-
-export function clearMarketHoldings(marketId: string): void {
-  const holdings = loadHoldings();
-  if (holdings[marketId]) {
-    delete holdings[marketId];
+    const holdings = loadHoldings();
+    
+    if (!holdings[marketId]) {
+        holdings[marketId] = {};
+    }
+    
+    if (!holdings[marketId][tokenId]) {
+        holdings[marketId][tokenId] = 0;
+    }
+    
+    holdings[marketId][tokenId] += amount;
+    
     saveHoldings(holdings);
-    logToHoldingsFile(`HOLDINGS_CLEAR conditionId=${marketId}`);
-  }
+    logToHoldingsFile(`HOLDINGS_ADD conditionId=${marketId} tokenId=${tokenId} amount=${amount}`);
+    console.log(`Added ${amount} tokens to holdings: ${marketId} -> ${tokenId}`);
 }
+
+/**
+ * Get holdings for a specific token
+ */
+export function getHoldings(marketId: string, tokenId: string): number {
+    const holdings = loadHoldings();
+    return holdings[marketId]?.[tokenId] || 0;
+}
+
+/**
+ * Remove tokens from holdings after a SELL order
+ */
+export function removeHoldings(marketId: string, tokenId: string, amount: number): void {
+    const holdings = loadHoldings();
+    
+    if (!holdings[marketId] || !holdings[marketId][tokenId]) {
+        console.log(`No holdings found for ${marketId} -> ${tokenId}`);
+        return;
+    }
+    
+    const currentAmount = holdings[marketId][tokenId];
+    const newAmount = Math.max(0, currentAmount - amount);
+    
+    if (newAmount === 0) {
+        delete holdings[marketId][tokenId];
+        // Clean up empty market entries
+        if (Object.keys(holdings[marketId]).length === 0) {
+            delete holdings[marketId];
+        }
+    } else {
+        holdings[marketId][tokenId] = newAmount;
+    }
+    
+    saveHoldings(holdings);
+    console.log(`Removed ${amount} tokens from holdings: ${marketId} -> ${tokenId} (remaining: ${newAmount})`);
+}
+
+/**
+ * Get all holdings for a market
+ */
+export function getMarketHoldings(marketId: string): { [tokenId: string]: number } {
+    const holdings = loadHoldings();
+    return holdings[marketId] || {};
+}
+
+/**
+ * Get all holdings (for debugging/viewing)
+ */
+export function getAllHoldings(): TokenHoldings {
+    return loadHoldings();
+}
+
+/**
+ * Clear all holdings for a specific market
+ */
+export function clearMarketHoldings(marketId: string): void {
+    const holdings = loadHoldings();
+    if (holdings[marketId]) {
+        const tokenIds = Object.keys(holdings[marketId]);
+        logToHoldingsFile(`HOLDINGS_CLEAR conditionId=${marketId} tokenIds=${tokenIds.join(",")}`);
+        delete holdings[marketId];
+        saveHoldings(holdings);
+        console.log(`Cleared holdings for market: ${marketId}`);
+    } else {
+        console.log(`No holdings found for market: ${marketId}`);
+    }
+}
+
+/**
+ * Clear all holdings (use with caution)
+ */
+export function clearHoldings(): void {
+    saveHoldings({});
+    console.log("All holdings cleared");
+}
+
