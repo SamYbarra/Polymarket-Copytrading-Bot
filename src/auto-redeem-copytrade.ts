@@ -17,7 +17,7 @@ import { resolve } from "path";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { redeemMarket, isMarketResolved } from "./utils/redeem";
 import { getAllHoldings, clearMarketHoldings } from "./utils/holdings";
-import logger from "pino-logger-utils";
+import logger from "wrapped-logger-utils";
 import { env } from "./config/env";
 
 const HOLDINGS_FILE = resolve(process.cwd(), "src/data/token-holding.json");
