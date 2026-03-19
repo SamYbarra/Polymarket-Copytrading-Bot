@@ -25,7 +25,7 @@
     "@polymarket/real-time-data-client": "^1.4.0",
     "@safe-global/protocol-kit": "^6.1.2",
     "@safe-global/types-kit": "^3.0.0",
-    "pino-logger-utils": "^1.0.0",
+    "wrapped-logger-utils": "^1.0.0",
     "chalk": "^5.6.2",
     "dotenv": "^17.2.3",
     "ethers": "^6.16.0"

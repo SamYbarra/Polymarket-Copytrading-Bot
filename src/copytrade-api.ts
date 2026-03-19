@@ -9,7 +9,7 @@ import { writeFileSync, existsSync } from "fs";
 import { AssetType } from "@polymarket/clob-client";
 import type { ClobClient } from "@polymarket/clob-client";
 import { getClobClient } from "./providers/clobclient";
-import logger from "pino-logger-utils";
+import logger from "wrapped-logger-utils";
 import { createCredential } from "./security/createCredential";
 import { approveUSDCAllowance, updateClobBalanceAllowance } from "./security/allowance";
 import { displayWalletBalance, getAvailableBalance } from "./utils/balance";

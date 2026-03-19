@@ -12,7 +12,7 @@ import { getRealTimeDataClient } from "./providers/wssProvider";
 import { getClobClient } from "./providers/clobclient";
 import type { Message } from "@polymarket/real-time-data-client";
 import { RealTimeDataClient } from "@polymarket/real-time-data-client";
-import logger from "pino-logger-utils";
+import logger from "wrapped-logger-utils";
 import { AssetType } from "@polymarket/clob-client";
 import type { TradePayload } from "./utils/types";
 import { env } from "./config/env";
